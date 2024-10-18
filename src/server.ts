@@ -1,5 +1,8 @@
 import express, { Request, Response, RequestHandler } from "express";
+import path from "path";
 import axios from "axios";
+import MiloLRUCache from "./lib/miloDB";
+import Snapshot from "./lib/snapshot";
 import ConsistentHashing from "./lib/consistentHashing";
 import Heartbeat from "./lib/heartbeat";
 
@@ -9,34 +12,43 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const isTestEnv = process.env.NODE_ENV === "test";
 const nodes = isTestEnv
-  ? [`http://localhost:${PORT}`] // In test environment, run as a single node
-  : ["http://localhost:3001", "http://localhost:3002", "http://localhost:3003"]; // Actual node list for non-test
+  ? [`http://localhost:${PORT}`]
+  : ["http://localhost:3001", "http://localhost:3002", "http://localhost:3003"];
 
-// Set up consistent hashing with replication
+const snapshot = new Snapshot(path.join(__dirname, "cache_snapshot.json"));
+
+// Initialize MiloLRUCache with a capacity of 100 items
+const cache = new MiloLRUCache<string, string>(100);
+
+// Load snapshot into cache
+const loadedCache = snapshot.load();
+Object.keys(loadedCache).forEach((key) => cache.set(key, loadedCache[key]));
+
 const ch = new ConsistentHashing(2);
 nodes.forEach((node) => ch.addNode(node));
 
-// Set up heartbeat mechanism to detect node failures
+// Heartbeat mechanism
 const heartbeat = new Heartbeat(nodes);
 
-const cache: { [key: string]: string } = {};
+// Periodic Snapshot Saving (Every 60 seconds)
+setInterval(() => {
+  snapshot.save(cache.entriesWithExpiry());
+}, 60000);
 
-// Heartbeat endpoint to check node health
+// Heartbeat Endpoint
 app.get("/heartbeat", (req: Request, res: Response) => {
   res.json({ alive: true });
 });
 
-// GET: Retrieve a value by key
+// GET: Retrieve value by key
 const getHandler: RequestHandler<{ key: string }> = async (req, res) => {
   const key = req.params.key;
   const responsibleNodes = ch.getNodes(key);
-
   let foundValue = false;
 
-  // Try the primary node first
   for (const node of responsibleNodes) {
     if (node === `http://localhost:${PORT}`) {
-      const value = cache[key] || null;
+      const value = cache.get(key);
       if (value !== null) {
         res.json({ value });
         foundValue = true;
@@ -64,17 +76,17 @@ const getHandler: RequestHandler<{ key: string }> = async (req, res) => {
 // Use the defined handler
 app.get("/get/:key", getHandler);
 
-// POST: Set a value
+// POST: Set value with optional TTL
 app.post("/set", async (req: Request, res: Response) => {
-  const { key, value } = req.body;
+  const { key, value, ttl } = req.body;
   const responsibleNodes = ch.getNodes(key);
 
   for (const node of responsibleNodes) {
     if (node === `http://localhost:${PORT}`) {
-      cache[key] = value;
+      cache.set(key, value, ttl); // Set value with TTL if provided
     } else if (!heartbeat.getFailedNodes().includes(node)) {
       try {
-        await axios.post(`${node}/set`, { key, value });
+        await axios.post(`${node}/set`, { key, value, ttl });
       } catch (err) {
         console.error(`Failed to set on ${node}`);
       }
@@ -84,10 +96,50 @@ app.post("/set", async (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-export default app;
+// DELETE: Delete a key
+app.delete("/delete/:key", async (req: Request, res: Response) => {
+  const key = req.params.key;
+  const responsibleNodes = ch.getNodes(key);
+  let responseSent = false;
+
+  for (const node of responsibleNodes) {
+    if (node === `http://localhost:${PORT}`) {
+      const success = cache.delete(key);
+      if (success) {
+        if (!responseSent) {
+          res.json({ success: true });
+          responseSent = true;
+        }
+      } else {
+        if (!responseSent) {
+          res.status(404).json({ error: "Key not found" });
+          responseSent = true;
+        }
+      }
+    } else if (!heartbeat.getFailedNodes().includes(node)) {
+      try {
+        await axios.delete(`${node}/delete/${key}`);
+        if (!responseSent) {
+          res.json({ success: true });
+          responseSent = true;
+        }
+      } catch (err) {
+        console.error(`Failed to delete on ${node}`);
+        if (!responseSent) {
+          res.status(500).json({ error: `Failed to delete on ${node}` });
+          responseSent = true;
+        }
+      }
+    }
+
+    if (responseSent) break; // Ensure the response is only sent once
+  }
+});
 
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`Node running on http://localhost:${PORT}`);
   });
 }
+
+export default app;

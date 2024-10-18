@@ -1,76 +1,93 @@
-import express from "express";
+import express, { Request, Response, RequestHandler } from "express";
 import axios from "axios";
 import ConsistentHashing from "./lib/consistentHashing";
+import Heartbeat from "./lib/heartbeat";
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const nodes = ["http://localhost:3001", "http://localhost:3002"]; // List of all nodes including this one
+const isTestEnv = process.env.NODE_ENV === "test";
+const nodes = isTestEnv
+  ? [`http://localhost:${PORT}`] // In test environment, run as a single node
+  : ["http://localhost:3001", "http://localhost:3002", "http://localhost:3003"]; // Actual node list for non-test
 
-// Consistent hashing object
-const ch = new ConsistentHashing(3);
+// Set up consistent hashing with replication
+const ch = new ConsistentHashing(2);
 nodes.forEach((node) => ch.addNode(node));
+
+// Set up heartbeat mechanism to detect node failures
+const heartbeat = new Heartbeat(nodes);
 
 const cache: { [key: string]: string } = {};
 
-// GET: Retrieve a value by key
-app.get("/get/:key", (req, res) => {
-  const key = req.params.key;
-  const responsibleNode = ch.getNode(key);
-
-  if (responsibleNode === `http://localhost:${PORT}`) {
-    const value = cache[key] || null;
-    res.json({ value });
-  } else {
-    // Forward request to the responsible node
-    axios
-      .get(`${responsibleNode}/get/${key}`)
-      .then((response) => res.json(response.data))
-      .catch((err) =>
-        res.status(500).json({ error: "Error fetching from node" })
-      );
-  }
+// Heartbeat endpoint to check node health
+app.get("/heartbeat", (req: Request, res: Response) => {
+  res.json({ alive: true });
 });
+
+// GET: Retrieve a value by key
+const getHandler: RequestHandler<{ key: string }> = async (req, res) => {
+  const key = req.params.key;
+  const responsibleNodes = ch.getNodes(key);
+
+  let foundValue = false;
+
+  // Try the primary node first
+  for (const node of responsibleNodes) {
+    if (node === `http://localhost:${PORT}`) {
+      const value = cache[key] || null;
+      if (value !== null) {
+        res.json({ value });
+        foundValue = true;
+        return;
+      }
+    } else if (!heartbeat.getFailedNodes().includes(node)) {
+      try {
+        const response = await axios.get(`${node}/get/${key}`);
+        if (response.data.value !== null) {
+          res.json(response.data);
+          foundValue = true;
+          return;
+        }
+      } catch (err) {
+        console.error(`Failed to get from ${node}`);
+      }
+    }
+  }
+
+  if (!foundValue) {
+    res.status(404).json({ error: "Key not found" });
+  }
+};
+
+// Use the defined handler
+app.get("/get/:key", getHandler);
 
 // POST: Set a value
-app.post("/set", (req, res) => {
+app.post("/set", async (req: Request, res: Response) => {
   const { key, value } = req.body;
-  const responsibleNode = ch.getNode(key);
+  const responsibleNodes = ch.getNodes(key);
 
-  if (responsibleNode === `http://localhost:${PORT}`) {
-    cache[key] = value;
-    res.json({ success: true });
-  } else {
-    // Forward request to the responsible node
-    axios
-      .post(`${responsibleNode}/set`, { key, value })
-      .then((response) => res.json(response.data))
-      .catch((err) =>
-        res.status(500).json({ error: "Error forwarding to node" })
-      );
+  for (const node of responsibleNodes) {
+    if (node === `http://localhost:${PORT}`) {
+      cache[key] = value;
+    } else if (!heartbeat.getFailedNodes().includes(node)) {
+      try {
+        await axios.post(`${node}/set`, { key, value });
+      } catch (err) {
+        console.error(`Failed to set on ${node}`);
+      }
+    }
   }
+
+  res.json({ success: true });
 });
 
-// DELETE: Delete a key-value pair
-app.delete("/delete/:key", (req, res) => {
-  const key = req.params.key;
-  const responsibleNode = ch.getNode(key);
+export default app;
 
-  if (responsibleNode === `http://localhost:${PORT}`) {
-    delete cache[key];
-    res.json({ success: true });
-  } else {
-    // Forward request to the responsible node
-    axios
-      .delete(`${responsibleNode}/delete/${key}`)
-      .then((response) => res.json(response.data))
-      .catch((err) =>
-        res.status(500).json({ error: "Error forwarding to node" })
-      );
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Node running on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Node running on http://localhost:${PORT}`);
+  });
+}

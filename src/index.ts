@@ -21,7 +21,7 @@ ch.addNode("Node2");
 ch.addNode("Node3");
 
 // Example key lookups
-console.log(ch.getNode("Key1")); // Node responsible for Key1
-console.log(ch.getNode("Key2")); // Node responsible for Key2
+console.log(ch.getNodes("Key1")); // Node responsible for Key1
+console.log(ch.getNodes("Key2")); // Node responsible for Key2
 
 ch.removeNode("Node1"); // After removing a node, keys are redistributed

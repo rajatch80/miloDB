@@ -44,16 +44,24 @@ class ConsistentHashing<K> {
     this.ring = new Map([...this.ring.entries()].sort((a, b) => a[0] - b[0]));
   }
 
-  // Find the node responsible for a given key
-  getNode(key: K): string {
+  // Find the primary and replica nodes for a given key
+  getNodes(key: K): string[] {
     const keyHash = this.hash(String(key));
+    const nodes = [];
+
     for (const [hash, node] of this.ring) {
       if (keyHash <= hash) {
-        return node;
+        nodes.push(node);
+        if (nodes.length === this.replicas) break;
       }
     }
-    // If no larger hash, wrap around to the first node
-    return [...this.ring.values()][0];
+
+    // If there aren't enough nodes after traversing, wrap around
+    while (nodes.length < this.replicas && [...this.ring.values()].length > 0) {
+      nodes.push([...this.ring.values()][0]);
+    }
+
+    return nodes;
   }
 }
 

@@ -8,6 +8,7 @@ const config: Config = {
   transform: {
     "^.+\\.ts$": "ts-jest",
   },
+  forceExit: true,
 };
 
 export default config;

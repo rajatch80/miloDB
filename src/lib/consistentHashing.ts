@@ -57,8 +57,14 @@ class ConsistentHashing<K> {
     }
 
     // If there aren't enough nodes after traversing, wrap around
-    while (nodes.length < this.replicas && [...this.ring.values()].length > 0) {
-      nodes.push([...this.ring.values()][0]);
+    if (nodes.length < this.replicas) {
+      for (const node of this.ring.values()) {
+        if (!nodes.includes(node)) {
+          // Avoid duplicates
+          nodes.push(node);
+          if (nodes.length === this.replicas) break;
+        }
+      }
     }
 
     return nodes;

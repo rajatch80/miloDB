@@ -15,7 +15,10 @@ const nodes = isTestEnv
   ? [`http://localhost:${PORT}`]
   : ["http://localhost:3001", "http://localhost:3002", "http://localhost:3003"];
 
-const snapshot = new Snapshot(path.join(__dirname, "cache_snapshot.json"));
+const snapshot = new Snapshot(
+  path.join(__dirname, "cache_snapshot.json"),
+  path.join(__dirname, "delta_snapshot.json")
+);
 
 // Initialize MiloLRUCache with a capacity of 100 items
 const cache = new MiloLRUCache<string, string>(100);
@@ -30,10 +33,15 @@ nodes.forEach((node) => ch.addNode(node));
 // Heartbeat mechanism
 const heartbeat = new Heartbeat(nodes);
 
-// Periodic Snapshot Saving (Every 60 seconds)
+// Periodically save full snapshot and deltas
 setInterval(() => {
-  snapshot.save(cache.entriesWithExpiry());
-}, 60000);
+  snapshot.saveDeltas(cache.getChanges()); // Save incremental changes
+  cache.clearChanges(); // Clear tracked changes after saving deltas
+}, 60000); // Save deltas every 60 seconds
+
+setInterval(() => {
+  snapshot.saveFull(cache.entriesWithExpiry()); // Save full snapshot less frequently
+}, 3600000); // Save full snapshot every 1 hour
 
 // Heartbeat Endpoint
 app.get("/heartbeat", (req: Request, res: Response) => {

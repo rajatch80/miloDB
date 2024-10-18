@@ -19,10 +19,13 @@ class MiloLRUCache<K, V> {
   private store: Map<K, Node<K, V>>;
   private head: Node<K, V> | null = null;
   private tail: Node<K, V> | null = null;
+  private changes: { [key: string]: { action: "set" | "delete"; value?: V } } =
+    {};
 
   constructor(capacity: number) {
     this.capacity = capacity;
     this.store = new Map();
+    this.changes = {};
   }
 
   // Set a value for a key with optional TTL
@@ -37,6 +40,7 @@ class MiloLRUCache<K, V> {
     const newNode = new Node(key, value, ttl);
     this.addNode(newNode);
     this.store.set(key, newNode);
+    this.changes[String(key)] = { action: "set", value };
 
     if (this.store.size > this.capacity) {
       const leastUsedNode = this.tail;
@@ -68,7 +72,11 @@ class MiloLRUCache<K, V> {
     if (!node) return false;
 
     this.removeNode(node);
-    return this.store.delete(key);
+    const result = this.store.delete(key);
+    if (result) {
+      this.changes[String(key)] = { action: "delete" };
+    }
+    return result;
   }
 
   // Add node to the front (most recently used)
@@ -129,6 +137,14 @@ class MiloLRUCache<K, V> {
         }
       },
     };
+  }
+
+  getChanges(): { [key: string]: { action: "set" | "delete"; value?: V } } {
+    return this.changes;
+  }
+
+  clearChanges(): void {
+    this.changes = {};
   }
 }
 
